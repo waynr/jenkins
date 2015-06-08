@@ -293,6 +293,11 @@ THE SOFTWARE.
       <version>1.1.1-hudson-1</version>
     </dependency>
     <dependency>
+      <groupId>xom</groupId>
+      <artifactId>xom</artifactId>
+      <version>1.2.5</version>
+    </dependency>
+    <dependency>
       <groupId>jaxen</groupId>
       <artifactId>jaxen</artifactId>
       <version>1.1-beta-11</version>
@@ -618,7 +623,7 @@ THE SOFTWARE.
                  </configuration>
              </execution>
          </executions>
-      </plugin>    
+      </plugin>
       <plugin>
         <groupId>org.jenkins-ci.tools</groupId>
         <artifactId>maven-hpi-plugin</artifactId>

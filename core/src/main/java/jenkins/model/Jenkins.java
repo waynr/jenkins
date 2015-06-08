@@ -200,7 +200,9 @@ import jenkins.security.MasterToSlaveCallable;
 import jenkins.slaves.WorkspaceLocator;
 import jenkins.util.Timer;
 import jenkins.util.io.FileBoolean;
+import jenkins.util.xml.XMLUtils;
 import net.sf.json.JSONObject;
+import net.sf.json.xml.XMLSerializer;
 import org.acegisecurity.AccessDeniedException;
 import org.acegisecurity.AcegiSecurityException;
 import org.acegisecurity.Authentication;
@@ -234,6 +236,7 @@ import org.kohsuke.stapler.StaplerProxy;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
 import org.kohsuke.stapler.WebApp;
+import org.kohsuke.stapler.WebMethod;
 import org.kohsuke.stapler.export.Exported;
 import org.kohsuke.stapler.export.ExportedBean;
 import org.kohsuke.stapler.framework.adjunct.AdjunctManager;
@@ -241,6 +244,7 @@ import org.kohsuke.stapler.interceptor.RequirePOST;
 import org.kohsuke.stapler.jelly.JellyClassLoaderTearOff;
 import org.kohsuke.stapler.jelly.JellyRequestDispatcher;
 import org.xml.sax.InputSource;
+import org.xml.sax.SAXException;
 
 import javax.annotation.CheckForNull;
 import javax.annotation.Nonnull;
@@ -251,6 +255,8 @@ import javax.servlet.ServletContext;
 import javax.servlet.ServletException;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletResponse;
+import javax.xml.transform.TransformerException;
+import javax.xml.transform.stream.StreamResult;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -292,6 +298,8 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import javax.xml.transform.Source;
+import javax.xml.transform.stream.StreamSource;
 
 import static hudson.Util.*;
 import static hudson.init.InitMilestone.*;
@@ -2873,6 +2881,75 @@ public class Jenkins extends AbstractCIBase implements DirectlyModifiableTopLeve
     }
 
     /**
+     * Accepts and serves <tt>config.xml</tt> for great good.
+     */
+    @WebMethod(name = "config.xml")
+    public void doConfigDotXml(StaplerRequest req, StaplerResponse rsp)
+            throws IOException {
+
+        if (req.getMethod().equals("GET")) {
+            // read
+            checkPermission(ADMINISTER);
+            rsp.setContentType("application/xml");
+            XmlFile cfg = getConfigFile();
+            if (!cfg.exists()) {
+                cfg.unmarshal(Jenkins.this);
+            }
+            IOUtils.copy(cfg.getFile() ,rsp.getOutputStream());
+            return;
+        }
+        if (req.getMethod().equals("POST")) {
+            // submission
+            checkPermission(ADMINISTER);
+            updateByXml(req, (Source)new StreamSource(req.getReader()));
+            return;
+        }
+
+        rsp.sendError(SC_BAD_REQUEST);
+    }
+
+    public void updateByXml(StaplerRequest req, Source source)
+        throws IOException {
+        StringWriter out = new StringWriter();
+        try {
+            // this allows us to use UTF-8 for storing data,
+            // plus it checks any well-formedness issue in the submitted
+            // data
+            XMLUtils.safeTransform(source, new StreamResult(out));
+            out.close();
+        } catch (TransformerException e) {
+            throw new IOException("Failed to persist config.xml", e);
+        } catch (SAXException e) {
+            throw new IOException("Failed to persist config.xml", e);
+        }
+
+        String xml = out.toString();
+
+        XMLSerializer xmlSerializer = new XMLSerializer();
+
+        JSONObject json = (JSONObject) xmlSerializer.read(xml);
+
+        BulkChange bc = new BulkChange(this);
+        try {
+
+            jdks.clear();
+            jdks.addAll(req.bindJSONToList(JDK.class,json.get("jdks")));
+
+            boolean result = true;
+            for (Descriptor<?> d : Functions.getSortedDescriptorsForGlobalConfigUnclassified())
+                configureDescriptor2(req,json,d);
+            version = VERSION;
+
+            save();
+            updateComputerList();
+        } catch (FormException e) {
+            throw new IOException("Failed to persist config.xml", e);
+        } finally {
+            bc.commit();
+        }
+    }
+
+    /**
      * Gets the {@link CrumbIssuer} currently in use.
      *
      * @return null if none is in use.
@@ -2889,10 +2966,27 @@ public class Jenkins extends AbstractCIBase implements DirectlyModifiableTopLeve
         rsp.sendRedirect("foo");
     }
 
+    private boolean configureDescriptor2(StaplerRequest req, JSONObject json, Descriptor<?> d) throws FormException {
+        String name = d.getJsonSafeClassName();
+        if (json.has(name)) {
+            JSONObject o = json.getJSONObject(name);
+
+            LOGGER.info(name + ": " + o.toString());
+            return d.configure(req, o);
+        } else {
+            return false;
+        }
+    }
+
     private boolean configureDescriptor(StaplerRequest req, JSONObject json, Descriptor<?> d) throws FormException {
         // collapse the structure to remain backward compatible with the JSON structure before 1.
         String name = d.getJsonSafeClassName();
-        JSONObject js = json.has(name) ? json.getJSONObject(name) : new JSONObject(); // if it doesn't have the property, the method returns invalid null object.
+        JSONObject js;
+        js = new JSONObject();
+        if (json.has(name)) {
+            js = json.getJSONObject(name);
+            LOGGER.info(name + ": " + js.toString());
+        }
         json.putAll(js);
         return d.configure(req, js);
     }
